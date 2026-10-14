@@ -1,0 +1,63 @@
+# A Group – Permission-aware RAG Wiki: hạ tầng local (PostgreSQL + pgvector, OpenFGA)
+# Chạy:  docker compose up -d      Kiểm tra: docker compose ps
+name: a-group-rag-wiki
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: agroup-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wiki}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wiki_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-premission_wiki}
+      OPENFGA_DB: ${OPENFGA_DB:-openfga}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Chỉ chạy lần đầu khi volume còn trống: tạo DB openfga + extension
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wiki} -d ${POSTGRES_DB:-premission_wiki}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  openfga-migrate:
+    image: openfga/openfga:v1.8.4
+    container_name: agroup-openfga-migrate
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://${POSTGRES_USER:-wiki}:${POSTGRES_PASSWORD:-wiki_dev_password}@postgres:5432/${OPENFGA_DB:-openfga}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  openfga:
+    image: openfga/openfga:v1.8.4
+    container_name: agroup-openfga
+    command: run
+    restart: unless-stopped
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://${POSTGRES_USER:-wiki}:${POSTGRES_PASSWORD:-wiki_dev_password}@postgres:5432/${OPENFGA_DB:-openfga}?sslmode=disable
+      OPENFGA_LOG_FORMAT: json
+      OPENFGA_PLAYGROUND_ENABLED: "true"   # chỉ cho dev; tắt ở môi trường thật
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${OPENFGA_HTTP_PORT:-8080}:8080"   # HTTP API
+      - "${OPENFGA_GRPC_PORT:-8081}:8081"   # gRPC
+      - "${OPENFGA_PLAYGROUND_PORT:-3000}:3000"  # Playground UI
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=localhost:8081"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

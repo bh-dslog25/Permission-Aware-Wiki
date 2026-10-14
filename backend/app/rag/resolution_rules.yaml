@@ -1,0 +1,53 @@
+# Bộ quy tắc ưu tiên văn bản – do HR / Compliance / Legal sở hữu, KHÔNG phải do LLM hay code quyết định.
+# Tra cứu theo (doc_type, topic); không có dòng topic khớp thì dùng dòng (doc_type, topic bỏ trống).
+# Không có dòng nào khớp mà văn bản nhiều cấp xung đột => hệ thống từ chối và chuyển Owner.
+#
+# mandatory_effect – tác dụng của văn bản cấp trên có cờ mandatory=true đối với văn bản cấp dưới:
+#   exclusive : cấp trên là nguồn duy nhất; văn bản cấp dưới cùng chủ đề bị loại.
+#   bounded   : cấp trên là khung (sàn/trần). Cấp dưới chỉ được dùng khi Owner đã xác nhận
+#               parent_conformance=confirmed. unverified => từ chối + chuyển Owner; conflicting => loại.
+# layering – cách xử lý các cấp KHÔNG bắt buộc còn lại:
+#   replace    : cấp cụ thể nhất thay thế cấp rộng hơn (không bắt buộc).
+#   accumulate : giữ toàn bộ chuỗi cấp (cấp dưới bổ sung, không thay thế). Dùng khi các cấp bổ sung nhau.
+# bound – chỉ để giải thích cho người dùng: floor (sàn) | ceiling (trần) | bỏ trống.
+# allow_multiple_same_level – cho phép nhiều văn bản cùng đơn vị, cùng chủ đề mà không khai báo quan hệ.
+ 
+rules:
+  - doc_type: policy
+    topic: nghi_phep
+    mandatory_effect: bounded
+    bound: floor
+    layering: accumulate
+    note: Tập đoàn đặt số ngày tối thiểu; Company cộng ngày theo thâm niên; phòng ban có lịch riêng.
+ 
+  - doc_type: policy
+    topic: lam_them_gio
+    mandatory_effect: bounded
+    bound: ceiling
+    layering: replace
+    note: Khung tối đa theo luật/Tập đoàn; cấp dưới chỉ được chặt hơn.
+ 
+  - doc_type: policy
+    topic: lam_viec_tu_xa
+    mandatory_effect: bounded
+    layering: replace
+ 
+  - doc_type: policy
+    topic: bao_mat_thong_tin
+    mandatory_effect: exclusive
+    layering: replace
+    note: Quy định bảo mật Tập đoàn áp dụng thống nhất, cấp dưới không ban hành bản riêng.
+ 
+  - doc_type: policy
+    topic: ky_luat
+    mandatory_effect: exclusive
+    layering: replace
+    note: Chủ đề nhạy cảm, thuộc HR/Legal; không cho cấp dưới thay thế.
+ 
+  - doc_type: policy            # mặc định cho mọi chủ đề policy chưa có dòng riêng
+    mandatory_effect: bounded
+    layering: replace
+ 
+  - doc_type: process
+    mandatory_effect: bounded
+    layering: replace

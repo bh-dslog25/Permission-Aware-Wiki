@@ -1,0 +1,175 @@
+# =============================================================================
+# org.yaml – Cây tổ chức, quan hệ và persona cho Wiki phân quyền A(MVP)
+# Nguồn đọc bởi: backend/app/authz/seed.py  → nạp vào OpenFGA
+#                backend/app/auth.py        → xác định user context (chọn persona)
+#                backend/app/authz/policy_adapter.py → ABAC tối giản (clearance)
+#
+# Schema nhỏ có chủ đích: 4 cấp, 3 quan hệ.
+#   user  --member_of--> team
+#   team  --part_of-->   phòng
+#   phòng --part_of-->   công ty --part_of--> tập đoàn
+#   tài liệu --owned_by--> đơn vị   (khai báo trong front matter của file .md)
+# Quyền kế thừa: người thuộc đơn vị con được xem tài liệu của đơn vị tổ tiên
+# (tập đoàn → công ty → phòng → nhóm), KHÔNG xem ngang hàng hay đi xuống.
+# =============================================================================
+
+version: 1
+as_of: "2026-10-12"          # "thời điểm hỏi" mặc định khi demo (T)
+org_name: "A Group"
+
+# -----------------------------------------------------------------------------
+# 1. Độ mật (ABAC) – thứ tự tăng dần. Chunk có classification <= max_classification
+#    của người dùng thì mới được truy xuất.
+# -----------------------------------------------------------------------------
+classifications:
+  - { id: public,       rank: 0, name: "Công khai" }
+  - { id: internal,     rank: 1, name: "Nội bộ" }
+  - { id: confidential, rank: 2, name: "Mật" }
+  - { id: restricted,   rank: 3, name: "Tuyệt mật" }
+
+# Độ mật tối đa theo vai trò (Policy Adapter ghép với kết quả ReBAC)
+role_clearance:
+  employee:   internal
+  manager:    confidential
+  hr_owner:   confidential     # Knowledge Owner / HR
+  security:   restricted       # Security / Compliance (chỉ dùng cho test, không có persona demo)
+
+# -----------------------------------------------------------------------------
+# 2. Cây tổ chức: Tập đoàn → Công ty → Phòng ban → Nhóm
+#    type: group | company | department | team
+# -----------------------------------------------------------------------------
+units:
+  # --- Cấp 1: Tập đoàn ---
+  - { id: a_group, name: "A Group", type: group, parent: null }
+
+  # --- Cấp 2: Công ty ---
+  - { id: company_a, name: "Company A", type: company, parent: a_group }
+  - { id: company_b, name: "Company B", type: company, parent: a_group }
+  - { id: company_c, name: "Company C", type: company, parent: a_group }
+
+  # --- Cấp 3: Phòng ban ---
+  # Company A
+  - { id: a_sales, name: "Phòng Kinh doanh",  type: department, parent: company_a }
+  - { id: a_tech,  name: "Phòng Kỹ thuật",    type: department, parent: company_a }
+  - { id: a_hr,    name: "Phòng Nhân sự",     type: department, parent: company_a }
+  # Company B
+  - { id: b_sales, name: "Phòng Kinh doanh",  type: department, parent: company_b }
+  - { id: b_tech,  name: "Phòng Kỹ thuật",    type: department, parent: company_b }
+  - { id: b_hr,    name: "Phòng Nhân sự",     type: department, parent: company_b }
+  # Company C
+  - { id: c_ops,   name: "Phòng Vận hành",    type: department, parent: company_c }
+  - { id: c_hr,    name: "Phòng Nhân sự",     type: department, parent: company_c }
+
+  # --- Cấp 4: Nhóm ---
+  - { id: a_sales_t1,  name: "Nhóm Kinh doanh 1", type: team, parent: a_sales }
+  - { id: a_sales_t2,  name: "Nhóm Kinh doanh 2", type: team, parent: a_sales }
+  - { id: a_tech_be,   name: "Nhóm Backend",      type: team, parent: a_tech }
+  - { id: a_hr_ops,    name: "Nhóm HR Vận hành",  type: team, parent: a_hr }
+  - { id: b_sales_t1,  name: "Nhóm Kinh doanh 1", type: team, parent: b_sales }
+  - { id: b_tech_be,   name: "Nhóm Backend",      type: team, parent: b_tech }
+  - { id: b_tech_qa,   name: "Nhóm QA",           type: team, parent: b_tech }
+  - { id: b_hr_ops,    name: "Nhóm HR Vận hành",  type: team, parent: b_hr }
+  - { id: c_ops_t1,    name: "Nhóm Vận hành 1",   type: team, parent: c_ops }
+  - { id: c_hr_ops,    name: "Nhóm HR Vận hành",  type: team, parent: c_hr }
+
+# -----------------------------------------------------------------------------
+# 3. Người dùng
+#    memberships: danh sách ngữ cảnh. Người kiêm nhiệm có >1 ngữ cảnh;
+#    mỗi lần hỏi CHỈ chọn MỘT ngữ cảnh (không gộp quyền).
+#    join_date dùng cho thâm niên (quy định nghỉ phép cộng ngày theo thâm niên).
+# -----------------------------------------------------------------------------
+users:
+  # ===== 3 persona cho kịch bản demo =====
+  - id: u_minh_anh
+    name: "Nguyễn Minh Anh"
+    persona: true
+    description: "Nhân viên Kinh doanh, Công ty A"
+    join_date: "2024-03-01"
+    memberships:
+      - { context_id: ctx_minh_anh_main, team: a_sales_t1, role: employee, title: "Chuyên viên Kinh doanh" }
+
+  - id: u_quoc_bao
+    name: "Trần Quốc Bảo"
+    persona: true
+    description: "Nhân viên Kỹ thuật, Công ty B"
+    join_date: "2021-07-15"
+    memberships:
+      - { context_id: ctx_quoc_bao_main, team: b_tech_be, role: employee, title: "Kỹ sư Backend" }
+
+  - id: u_thu_ha
+    name: "Lê Thu Hà"
+    persona: true
+    description: "Quản lý kiêm nhiệm: Trưởng phòng Kinh doanh Công ty A và quản lý nhóm QA Công ty B"
+    join_date: "2018-01-10"
+    memberships:
+      - { context_id: ctx_thu_ha_a, team: a_sales_t2, role: manager, title: "Trưởng phòng Kinh doanh – Công ty A", primary: true }
+      - { context_id: ctx_thu_ha_b, team: b_tech_qa,  role: manager, title: "Quản lý nhóm QA – Công ty B (kiêm nhiệm)" }
+
+  # ===== Người dùng phụ, phục vụ test thu hồi quyền / chuyển phòng / Owner =====
+  - id: u_hoang_nam
+    name: "Hoàng Nam"
+    persona: false
+    description: "Nhân viên Công ty A – Kỹ thuật (dùng test 'chuyển phòng' → thu hồi quyền trong SLA)"
+    join_date: "2022-05-20"
+    memberships:
+      - { context_id: ctx_hoang_nam_main, team: a_tech_be, role: employee, title: "Kỹ sư Backend" }
+
+  - id: u_pham_lan
+    name: "Phạm Lan"
+    persona: false
+    description: "Knowledge Owner / HR Công ty A (duyệt metadata, supersede)"
+    join_date: "2019-09-02"
+    memberships:
+      - { context_id: ctx_pham_lan_main, team: a_hr_ops, role: hr_owner, title: "HR Business Partner" }
+
+  - id: u_dao_khoa
+    name: "Đào Khoa"
+    persona: false
+    description: "Nhân viên Công ty C – Vận hành (người ngoài phạm vi A/B, dùng test lách quyền)"
+    join_date: "2023-11-06"
+    memberships:
+      - { context_id: ctx_dao_khoa_main, team: c_ops_t1, role: employee, title: "Chuyên viên Vận hành" }
+
+# -----------------------------------------------------------------------------
+# 4. Kịch bản test gợi ý (test_leakage.py / test_resolution.py đọc phần này)
+#    expect_units  = tập đơn vị tài liệu được phép thấy (tổ tiên của team hiện tại)
+#    deny_units    = đơn vị tuyệt đối không được có chunk nào
+# -----------------------------------------------------------------------------
+authz_expectations:
+  - context: ctx_minh_anh_main
+    max_classification: internal
+    expect_units: [a_sales_t1, a_sales, company_a, a_group]
+    deny_units:   [a_sales_t2, a_tech, a_hr, company_b, company_c, b_sales, b_tech, b_hr]
+
+  - context: ctx_quoc_bao_main
+    max_classification: internal
+    expect_units: [b_tech_be, b_tech, company_b, a_group]
+    deny_units:   [b_tech_qa, b_sales, b_hr, company_a, company_c, a_sales, a_tech]
+
+  - context: ctx_thu_ha_a        # chỉ quyền Công ty A, KHÔNG gộp quyền Công ty B
+    max_classification: confidential
+    expect_units: [a_sales_t2, a_sales, company_a, a_group]
+    deny_units:   [company_b, b_tech, b_tech_qa, company_c]
+
+  - context: ctx_thu_ha_b        # chỉ quyền Công ty B, KHÔNG gộp quyền Công ty A
+    max_classification: confidential
+    expect_units: [b_tech_qa, b_tech, company_b, a_group]
+    deny_units:   [company_a, a_sales, a_sales_t2, company_c]
+
+  - context: ctx_dao_khoa_main
+    max_classification: internal
+    expect_units: [c_ops_t1, c_ops, company_c, a_group]
+    deny_units:   [company_a, company_b, a_hr, b_hr]
+
+  - context: ctx_pham_lan_main
+    max_classification: internal
+    expect_units: [a_hr_ops, a_hr, company_a, a_group]
+    deny_units:   [company_c, company_b, a_hr, b_hr]  
+
+# -----------------------------------------------------------------------------
+# 5. Tham số vận hành liên quan quyền
+# -----------------------------------------------------------------------------
+settings:
+  revocation_sla_seconds: 300     # thu hồi quyền sau đổi tổ chức: vài phút
+  one_context_per_query: true     # người kiêm nhiệm chọn 1 ngữ cảnh mỗi lần
+  default_deny_on_missing_metadata: true

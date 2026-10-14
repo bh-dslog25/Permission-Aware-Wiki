@@ -1,0 +1,11 @@
+{
+  "title": "Appota Knowledge",
+  "description": "Permission-aware RAG wiki MVP",
+  "language": "vi",
+  "robots": {
+    "index": false
+  },
+  "icons": {
+    "icon": "/favicon.svg"
+  }
+}

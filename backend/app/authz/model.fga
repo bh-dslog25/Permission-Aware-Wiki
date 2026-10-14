@@ -1,0 +1,19 @@
+model
+  schema 1.1
+
+type user
+
+type unit
+  relations
+    # cha → con: tuple (unit:con, child, unit:cha) nghĩa là "unit:cha có con là unit:con"
+    define child: [unit]
+
+    # các đơn vị người dùng ĐƯỢC PHÉP chọn làm ngữ cảnh (ghi cố định khi seed)
+    define assigned: [user]
+
+    # ngữ cảnh ĐANG CHỌN. Chỉ được truyền dưới dạng contextual tuple lúc truy vấn,
+    # không ghi cố định, nên mỗi lần chỉ có một ngữ cảnh, không gộp quyền kiêm nhiệm.
+    define member: [user]
+
+    # xem được tri thức của đơn vị mình và mọi đơn vị cấp trên (tri thức đi từ trên xuống)
+    define viewer: member or viewer from child
