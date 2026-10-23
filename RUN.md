@@ -126,6 +126,7 @@ docker compose ps
 docker compose logs -f
 ```
 
+Ingest du lieu dau vao
 ```bash
 ..\backend
 .\.venv\Scripts\python.exe -m pip install -e ".[ml]"
@@ -134,6 +135,7 @@ docker compose logs -f
 
 ```bash
 cd backend
+.\.venv\Scripts\python.exe -m app.db init 
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
