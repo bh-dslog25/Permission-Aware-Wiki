@@ -16,9 +16,10 @@ import json
 import logging
 import re
 import unicodedata
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Collection, Protocol
+from typing import Any, Literal, Protocol
 
 from .resolution import (
     AbstainCode,
@@ -62,7 +63,7 @@ class Citation:
 
 @dataclass
 class GenerationResult:
-    status: str  # answered | abstained | needs_clarification
+    status: str  # answered | abstained | needs_clarification | answer_with_escalation
     answer: str
     citations: list[Citation] = field(default_factory=list)
     abstain_code: AbstainCode | None = None
@@ -70,6 +71,7 @@ class GenerationResult:
     dropped_claims: int = 0
     injection_flagged: list[str] = field(default_factory=list)
     used_chunk_ids: list[str] = field(default_factory=list)
+    escalate_to: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -82,45 +84,34 @@ INSUFFICIENT = (
     "Vui lòng liên hệ HR hoặc Knowledge Owner."
 )
 
-_ABSTAIN_MESSAGES: dict[AbstainCode, str] = {
-    AbstainCode.NO_EVIDENCE: GENERIC_NOT_FOUND,
-    AbstainCode.OUT_OF_SCOPE: GENERIC_NOT_FOUND,
-    AbstainCode.HIDDEN_SUCCESSOR: GENERIC_NOT_FOUND,  # tuyệt đối không lộ có bản mới bị ẩn
-    # Chỉ xảy ra khi ĐÃ có bằng chứng được phép xem nhưng không đủ/không kiểm chứng được → không lộ gì.
-    AbstainCode.INSUFFICIENT_EVIDENCE: INSUFFICIENT,
-    AbstainCode.NO_CITATION: INSUFFICIENT,
-    AbstainCode.UNRESOLVED_CONFLICT: (
-        "Tôi chưa đủ căn cứ để xác định quy định nào áp dụng cho bạn do các quy định hiện hành "
-        "chưa thống nhất. Vui lòng liên hệ Knowledge Owner{owners} để được xác nhận."
+PublicRefusalCode = Literal["A", "B", "C+D"]
+
+_PUBLIC_REFUSAL_MESSAGES: dict[PublicRefusalCode, str] = {
+    "A": GENERIC_NOT_FOUND,
+    "B": INSUFFICIENT,
+    "C+D": (
+        "Thông tin hoặc hệ thống cần được xử lý thêm nên hiện chưa thể hoàn tất yêu cầu. "
+        "Vui lòng thử lại sau hoặc liên hệ người phụ trách/đội kỹ thuật{owners}."
     ),
-    AbstainCode.METADATA_INCONSISTENT: (
-        "Thông tin về hiệu lực của quy định liên quan chưa nhất quán nên tôi không thể kết luận. "
-        "Vui lòng liên hệ Knowledge Owner{owners}."
-    ),
-    AbstainCode.AUTHZ_ERROR: "Hệ thống chưa thể xác minh quyền truy cập của bạn lúc này. Vui lòng thử lại sau.",
-    AbstainCode.RETRIEVAL_ERROR: "Hệ thống tạm thời không tra cứu được. Vui lòng thử lại sau.",
-    AbstainCode.LLM_ERROR: "Hệ thống tạm thời không tạo được câu trả lời. Vui lòng thử lại sau.",
-    AbstainCode.INVALID_OUTPUT: "Tôi chưa thể tạo câu trả lời đáng tin cậy cho câu hỏi này. Vui lòng liên hệ HR hoặc Knowledge Owner.",
 }
 
 
 def abstain_message(code: AbstainCode, owner_labels: list[str] | None = None) -> str:
-    msg = _ABSTAIN_MESSAGES.get(code, GENERIC_NOT_FOUND)
+    category = public_refusal_reason(code)
+    msg = _PUBLIC_REFUSAL_MESSAGES[category or "A"]
     owners = f" ({', '.join(owner_labels)})" if owner_labels else ""
     return msg.format(owners=owners) if "{owners}" in msg else msg
 
 
-def public_refusal_reason(code: AbstainCode | None) -> str | None:
-    """Mã từ chối an toàn để trả cho client. 'Không có' và 'bị chặn' cùng một mã (not_found)."""
+def public_refusal_reason(code: AbstainCode | None) -> PublicRefusalCode | None:
+    """Map lý do từ chối nội bộ thành một trong ba nhóm hiển thị công khai."""
     if code is None:
         return None
     if code in (AbstainCode.NO_EVIDENCE, AbstainCode.OUT_OF_SCOPE, AbstainCode.HIDDEN_SUCCESSOR):
-        return "not_found"
-    if code in (AbstainCode.UNRESOLVED_CONFLICT, AbstainCode.METADATA_INCONSISTENT):
-        return "needs_owner"
-    if code in (AbstainCode.INSUFFICIENT_EVIDENCE, AbstainCode.NO_CITATION, AbstainCode.INVALID_OUTPUT):
-        return "insufficient_evidence"
-    return "system_error"
+        return "A"
+    if code in (AbstainCode.INSUFFICIENT_EVIDENCE, AbstainCode.NO_CITATION):
+        return "B"
+    return "C+D"
 
 
 def abstain(code: AbstainCode, detail: str = "", owner_labels: list[str] | None = None, **kw: Any) -> GenerationResult:
@@ -378,11 +369,24 @@ def generate_answer(
                        dropped_claims=dropped, injection_flagged=flagged)
 
     answer, citations = _render(claims)
+    escalate_to = None
+    lower_q = (question or "").lower()
+    lower_ans = answer.lower()
+    has_res_warning = any("thieu ban goc" in n.lower() or "vi pham" in n.lower() or "unverified" in n.lower() for n in resolution.notes)
+
+    if any(k in lower_q for k in ["sa thải", "kỷ luật", "buộc thôi việc", "cách chức"]):
+        status = "answer_with_escalation"
+        escalate_to = "HR/Legal"
+    elif "on-call" in lower_q or "trực" in lower_q or has_res_warning or "xác nhận với" in lower_ans or "knowledge owner" in lower_ans:
+        status = "answer_with_escalation"
+        escalate_to = "Knowledge Owner"
+
     return GenerationResult(
-        status="answered",
+        status=status,
         answer=answer,
         citations=citations,
         dropped_claims=dropped,
         injection_flagged=flagged,
         used_chunk_ids=[c.chunk_id for c in citations],
+        escalate_to=escalate_to,
     )

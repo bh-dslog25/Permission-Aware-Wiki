@@ -11,6 +11,9 @@ effective_to: null
 status: active
 classification: internal
 mandatory: false
+parent_conformance: unverified
+policy_values:
+  annual_leave_days_min: 10
 supersedes: []
 amends: []
 ---

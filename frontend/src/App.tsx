@@ -69,7 +69,7 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
                 Tri thức đúng quyền, đúng ngữ cảnh
               </div>
               <h1 className="max-w-xl text-5xl font-semibold leading-[1.08] tracking-[-0.045em] text-[#172019]">
-                Câu trả lời nội bộ, dành riêng cho bạn.
+                Tri thức nội bộ, dành riêng cho bạn.
               </h1>
               <p className="mt-6 max-w-lg text-lg leading-8 text-[#626b64]">
                 Hỏi bằng ngôn ngữ tự nhiên. Nhận câu trả lời theo đúng đơn vị, phiên bản
@@ -104,7 +104,7 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
 
                 <label className="mb-5 block">
                   <span className="mb-2 block text-sm font-semibold text-[#3c453e]">
-                    Chọn tài khoản (từ org.yaml)
+                    Chọn tài khoản
                   </span>
                   <select
                     className="h-12 w-full rounded-xl border border-[#d8ded8] bg-[#fafbf9] px-4 text-[15px] outline-none transition focus:border-[#28734d] focus:bg-white focus:ring-4 focus:ring-[#28734d]/10"
@@ -176,12 +176,45 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
   );
 }
 
+import OwnerReviewPortal from "./components/OwnerReviewPortal";
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [currentView, setCurrentView] = useState<"chat" | "owner">("chat");
 
   if (!user) {
-    return <LoginPage onLogin={setUser} />;
+    return <LoginPage onLogin={(u) => {
+      setUser(u);
+      // Nếu là Knowledge Owner tự động có thể vào owner portal hoặc chat
+      if (u.role === "hr_owner" || u.role === "security") {
+        setCurrentView("owner");
+      } else {
+        setCurrentView("chat");
+      }
+    }} />;
   }
 
-  return <ChatPage onLogout={() => setUser(null)} user={user} />;
+  if (currentView === "owner") {
+    return (
+      <OwnerReviewPortal
+        user={user}
+        onBackToChat={() => setCurrentView("chat")}
+        onLogout={() => {
+          setUser(null);
+          setCurrentView("chat");
+        }}
+      />
+    );
+  }
+
+  return (
+    <ChatPage
+      onLogout={() => {
+        setUser(null);
+        setCurrentView("chat");
+      }}
+      user={user}
+      onOpenOwnerPortal={() => setCurrentView("owner")}
+    />
+  );
 }

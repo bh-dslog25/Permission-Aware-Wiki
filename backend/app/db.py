@@ -1,13 +1,14 @@
-"""Kết nối PostgreSQL, schema 4 bảng MVP (documents, document_relations, chunks, audit_log) và health check.
+"""Kết nối PostgreSQL, schema MVP và health check.
 
 Nguồn chuẩn duy nhất (Single Source of Truth) cho schema và khởi tạo database.
 Ref: README Section 3.1 & MVP Architecture.
 
-4 Bảng cho MVP:
+Các bảng chính:
   1. documents: metadata tài liệu (owner_unit, scope, classification rank 0-3, status, topic, parent_conformance...)
   2. document_relations: quan hệ phiên bản (supersedes, amends)
   3. chunks: chunk văn bản + vector embedding + denormalized metadata để lọc index
   4. audit_log: nhật ký truy vấn append-only
+  5. conversations: lịch sử hỏi đáp gắn với tài khoản demo
 
 CLI:
     python -m app.db init     # tạo schema (idempotent)
@@ -45,7 +46,7 @@ DOC_STATUSES = ("draft", "active", "superseded", "expired")
 RELATION_TYPES = ("supersedes", "amends")
 ALLOWED_DOC_TYPES = ("policy", "process", "guideline", "faq")
 
-EXPECTED_TABLES = {"documents", "document_relations", "chunks", "audit_log"}
+EXPECTED_TABLES = {"documents", "document_relations", "chunks", "audit_log", "conversations"}
 
 
 # -----------------------------------------------------------------------------
@@ -185,11 +186,25 @@ END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_audit_immutable ON audit_log;
 CREATE TRIGGER trg_audit_immutable BEFORE UPDATE OR DELETE ON audit_log
     FOR EACH ROW EXECUTE FUNCTION audit_log_immutable();
+
+-- 5. conversations (lịch sử hội thoại theo persona)
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    context_id      TEXT NOT NULL,
+    messages        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_updated
+    ON conversations (user_id, updated_at DESC);
 """
 
 
 RESET_SQL = """
 DROP TABLE IF EXISTS audit_log CASCADE;
+DROP TABLE IF EXISTS conversations CASCADE;
 DROP TABLE IF EXISTS chunks CASCADE;
 DROP TABLE IF EXISTS document_relations CASCADE;
 DROP TABLE IF EXISTS documents CASCADE;

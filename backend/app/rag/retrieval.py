@@ -102,6 +102,8 @@ class Candidate:
     # Quan he phien ban tu document_relations (co the None)
     superseded_by: str | None = None
     amended_by: str | None = None
+    parent_conformance: str | None = None  # confirmed | unverified | conflicting
+    policy_values: dict[str, Any] | None = None
     keyword_rank: int | None = None
     vector_rank: int | None = None
     score: float = 0.0
@@ -128,6 +130,8 @@ class Candidate:
             mandatory=bool(row.get("mandatory")),
             superseded_by=row.get("superseded_by"),
             amended_by=row.get("amended_by"),
+            parent_conformance=row.get("parent_conformance"),
+            policy_values=row.get("policy_values"),
         )
 
 
@@ -162,6 +166,7 @@ SELECT
     d.doc_type,
     d.version,
     d.content_hash,
+    d.parent_conformance,
     sup.source_document_id AS superseded_by,
     amd.source_document_id AS amended_by
     {extra_cols}

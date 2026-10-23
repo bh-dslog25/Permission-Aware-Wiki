@@ -39,16 +39,26 @@ export type Source = {
   owner: string;
 };
 
-export type AnswerStatus = "answered" | "denied" | "insufficient";
+export type AnswerStatus =
+  | "answered"
+  | "denied"
+  | "insufficient"
+  | "needs_attention"
+  | "needs_clarification"
+  | "answer_with_escalation";
+export type PublicRefusalCode = "A" | "B" | "C+D";
 
 export type ChatAnswer = {
   id: string;
+  conversationId?: string;
   status: AnswerStatus;
   title?: string;
   content: string;
   details?: string[];
   sources: Source[];
   answeredAt: string;
+  availableContexts?: ContextOption[];
+  escalateTo?: string | null;
 };
 
 type BackendCitation = {
@@ -62,7 +72,7 @@ type BackendCitation = {
 };
 
 type BackendAnswer = {
-  status: "answered" | "abstained" | "needs_clarification";
+  status: "answered" | "abstained" | "needs_clarification" | "answer_with_escalation";
   answer: string;
   applies_to?: string | null;
   context_label?: string | null;
@@ -70,8 +80,27 @@ type BackendAnswer = {
   as_of?: string | null;
   citations: BackendCitation[];
   refused: boolean;
-  refusal_reason?: string | null;
+  refusal_reason?: PublicRefusalCode | null;
+  escalate_to?: string | null;
+  available_contexts?: ContextOption[];
   request_id: string;
+  conversation_id?: string | null;
+};
+
+export type ConversationSummary = {
+  id: string;
+  title: string;
+  context_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConversationDetail = ConversationSummary & {
+  messages: Array<{
+    id: string;
+    question: string;
+    answer: BackendAnswer;
+  }>;
 };
 
 type BackendPersona = {
@@ -177,6 +206,18 @@ export async function fetchPersonas(): Promise<Persona[]> {
         defaultContextId: "ctx_thu_ha_a",
         initials: "TH",
       },
+      {
+        id: "u_pham_lan",
+        name: "Phạm Lan",
+        email: "pham.lan@appota.com",
+        title: "HR Business Partner",
+        role: "hr_owner",
+        clearance: "confidential",
+        description: "Knowledge Owner / HR Công ty A (duyệt metadata, supersede)",
+        contexts: [{ id: "ctx_pham_lan_main", label: "Phòng Nhân sự (Công ty A)" }],
+        defaultContextId: "ctx_pham_lan_main",
+        initials: "PL",
+      },
     ];
   }
 }
@@ -225,15 +266,18 @@ function formatDate(value?: string | null) {
 
 function statusOf(answer: BackendAnswer): AnswerStatus {
   if (answer.status === "answered") return "answered";
-  return answer.refusal_reason === "not_found" || answer.refusal_reason === "system_error"
-    ? "denied"
-    : "insufficient";
+  if (answer.status === "needs_clarification") return "needs_clarification";
+  if (answer.status === "answer_with_escalation") return "answer_with_escalation";
+  if (answer.refusal_reason === "A") return "denied";
+  if (answer.refusal_reason === "B") return "insufficient";
+  return "needs_attention";
 }
 
 export async function askQuestion(
   question: string,
   userId: string,
   contextId: string,
+  conversationId?: string,
 ): Promise<ChatAnswer> {
   const response = await fetch(`${API_BASE_URL}/api/v1/ask`, {
     method: "POST",
@@ -244,6 +288,7 @@ export async function askQuestion(
     body: JSON.stringify({
       question,
       context_id: contextId,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
     }),
   });
 
@@ -253,6 +298,10 @@ export async function askQuestion(
   }
 
   const answer = (await response.json()) as BackendAnswer;
+  return toChatAnswer(answer);
+}
+
+function toChatAnswer(answer: BackendAnswer): ChatAnswer {
   const sources = answer.citations.map((citation) => ({
     id: citation.chunk_id,
     title: citation.title,
@@ -269,18 +318,183 @@ export async function askQuestion(
     answer.request_id ? `Request ID: ${answer.request_id}.` : null,
   ].filter(Boolean) as string[];
 
+  let title: string | undefined = undefined;
+  if (answer.status === "answered") {
+    title = "Câu trả lời dựa trên nguồn được phép";
+  } else if (answer.status === "needs_clarification") {
+    title = "Yêu cầu chọn ngữ cảnh làm việc";
+  } else if (answer.status === "answer_with_escalation") {
+    title = `Cần xác nhận với ${answer.escalate_to ?? "Knowledge Owner"}`;
+  }
+
   return {
     id: answer.request_id,
+    conversationId: answer.conversation_id ?? undefined,
     status: statusOf(answer),
-    title:
-      answer.status === "answered"
-        ? "Câu trả lời dựa trên nguồn được phép"
-        : answer.status === "needs_clarification"
-          ? "Cần làm rõ câu hỏi"
-          : undefined,
+    title,
     content: answer.answer,
     details,
     sources,
     answeredAt: formatTime(),
+    availableContexts: answer.available_contexts,
+    escalateTo: answer.escalate_to,
   };
+}
+
+export async function fetchConversations(userId: string): Promise<ConversationSummary[]> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/conversations`, {
+    headers: { "X-Persona-Id": userId },
+  });
+  if (!response.ok) {
+    throw new Error("Không tải được lịch sử hội thoại.");
+  }
+  return (await response.json()) as ConversationSummary[];
+}
+
+export async function fetchConversation(
+  userId: string,
+  conversationId: string,
+): Promise<ConversationDetail> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/conversations/${encodeURIComponent(conversationId)}`, {
+    headers: { "X-Persona-Id": userId },
+  });
+  if (!response.ok) {
+    throw new Error("Không tải được nội dung cuộc trò chuyện.");
+  }
+  return (await response.json()) as ConversationDetail;
+}
+
+export function toConversationEntry(entry: ConversationDetail["messages"][number]) {
+  return {
+    id: entry.id,
+    question: entry.question,
+    answer: toChatAnswer(entry.answer),
+  };
+}
+
+export async function submitFeedback(
+  requestId: string,
+  contextId: string,
+  content: string = "",
+  escalateTo?: string | null,
+  personaId?: string,
+): Promise<{ status: string; message: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/feedback`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(personaId ? { "X-Persona-Id": personaId } : {}),
+    },
+    body: JSON.stringify({
+      request_id: requestId,
+      context_id: contextId,
+      content,
+      escalate_to: escalateTo || "Knowledge Owner",
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail ?? "Không gửi được phản hồi.");
+  }
+
+  return await response.json();
+}
+
+export type PendingReviewItem = {
+  document_id: string;
+  title: string;
+  doc_type: string;
+  owner_unit: string;
+  owner_unit_name: string;
+  scope: string;
+  classification: number;
+  version: string;
+  valid_from: string;
+  valid_to: string | null;
+  status: string;
+  mandatory: boolean;
+  approved: boolean;
+  topic: string | null;
+  parent_conformance: "confirmed" | "unverified" | "conflicting";
+  source_path: string;
+  updated_at?: string;
+  last_review?: {
+    doc_id: string;
+    user_id: string;
+    ts: string;
+    decision: "confirmed" | "conflicting" | "unverified";
+    justification: string;
+    clause: string;
+  } | null;
+  chunks: Array<{
+    chunk_id: string;
+    chunk_index: number;
+    section_path: string | null;
+    content: string;
+  }>;
+  parent_policy?: {
+    document_id: string;
+    title: string;
+    owner_unit: string;
+    owner_unit_name: string;
+    scope: string;
+    version: string;
+    mandatory: boolean;
+    topic: string;
+    chunks: Array<{
+      chunk_id: string;
+      chunk_index: number;
+      section_path: string | null;
+      content: string;
+    }>;
+  } | null;
+};
+
+export async function fetchPendingReviews(
+  personaId: string,
+  status: "pending" | "reviewed" | "all" = "pending",
+): Promise<{
+  owner: { id: string; name: string; role: string };
+  stats?: { pending: number; reviewed: number; total: number };
+  items: PendingReviewItem[];
+}> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/owner/pending-reviews?status=${status}`, {
+    headers: {
+      "X-Persona-Id": personaId,
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail ?? "Không thể tải danh sách tài liệu.");
+  }
+
+  return await response.json();
+}
+
+export async function submitDocumentReview(
+  documentId: string,
+  personaId: string,
+  payload: {
+    decision: "confirmed" | "conflicting" | "unverified";
+    justification: string;
+    clause: string;
+  },
+): Promise<{ status: string; message: string; new_conformance: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/owner/reviews/${documentId}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Persona-Id": personaId,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail ?? "Không thể gửi kết quả phê duyệt.");
+  }
+
+  return await response.json();
 }

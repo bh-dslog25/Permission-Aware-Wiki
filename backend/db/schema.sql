@@ -139,3 +139,18 @@ END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_audit_immutable ON audit_log;
 CREATE TRIGGER trg_audit_immutable BEFORE UPDATE OR DELETE ON audit_log
     FOR EACH ROW EXECUTE FUNCTION audit_log_immutable();
+
+-- ---------------------------------------------------------------------------
+-- 5. conversations (conversation history scoped to a persona)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    context_id      TEXT NOT NULL,
+    messages        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_updated
+    ON conversations (user_id, updated_at DESC);

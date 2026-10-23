@@ -11,6 +11,9 @@ effective_to: null
 status: active
 classification: internal
 mandatory: false
+parent_conformance: unverified
+policy_values:
+  overtime_monthly_hours_max: 50
 supersedes: []
 amends: []
 ---

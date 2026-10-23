@@ -71,9 +71,16 @@ class GeminiClient:
 
         last: Exception | None = None
         for attempt in range(self._cfg.max_retries + 1):
+            started = time.perf_counter()
             try:
                 resp = self._client.models.generate_content(
                     model=self._cfg.model, contents=user, config=config
+                )
+                logger.info(
+                    "gemini_call_completed model=%s attempt=%d duration_ms=%.1f",
+                    self._cfg.model,
+                    attempt + 1,
+                    (time.perf_counter() - started) * 1000,
                 )
                 text = getattr(resp, "text", None)
                 if not text:  # bị chặn bởi safety hoặc rỗng — thử lại không giúp ích
@@ -83,7 +90,12 @@ class GeminiClient:
                 raise
             except Exception as exc:  # noqa: BLE001 — lỗi mạng/429/5xx: thử lại có backoff
                 last = exc
-                logger.warning("Gemini lỗi (lần %d): %s", attempt + 1, type(exc).__name__)
+                logger.warning(
+                    "Gemini lỗi (lần %d): %s; duration_ms=%.1f",
+                    attempt + 1,
+                    type(exc).__name__,
+                    (time.perf_counter() - started) * 1000,
+                )
                 if attempt < self._cfg.max_retries:
                     time.sleep(min(2 ** attempt, 8))
         raise LLMError("Gemini không phản hồi sau khi thử lại") from last

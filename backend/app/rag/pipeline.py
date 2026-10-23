@@ -26,13 +26,14 @@ from .generation import (
     GenerationConfig,
     GenerationResult,
     LLMClient,
+    PublicRefusalCode,
     abstain,
     generate_answer,
     parse_llm_json,
     public_refusal_reason,
 )
 from .resolution import AbstainCode, resolve
-from .retrieval import HybridRetriever, RetrievalError, UserScope, tokenize, _STOPWORDS
+from .retrieval import _STOPWORDS, HybridRetriever, RetrievalError, UserScope, tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,13 @@ class CitationOut(BaseModel):
     version_number: str | None = None
 
 
+class ContextOption(BaseModel):
+    id: str
+    label: str
+
+
 class AskResponse(BaseModel):
-    status: Literal["answered", "abstained", "needs_clarification"]
+    status: Literal["answered", "abstained", "needs_clarification", "answer_with_escalation"]
     answer: str
     applies_to: str | None = None
     context_label: str | None = None
@@ -99,8 +105,11 @@ class AskResponse(BaseModel):
     as_of: date | None = None
     citations: list[CitationOut] = Field(default_factory=list)
     refused: bool = False
-    refusal_reason: str | None = None  # not_found | needs_owner | insufficient_evidence | system_error
+    refusal_reason: PublicRefusalCode | None = None
+    escalate_to: str | None = None
+    available_contexts: list[ContextOption] = Field(default_factory=list)
     request_id: str
+    conversation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +186,12 @@ class _Trace:
     source_hashes: list[str] = field(default_factory=list)
 
 
+def _timed_parse(parser: Any, question: str, today: date) -> tuple[StructuredQuery, float]:
+    started = time.perf_counter()
+    result = parser.parse(question, today)
+    return result, (time.perf_counter() - started) * 1000
+
+
 class RagPipeline:
     def __init__(
         self,
@@ -199,14 +214,22 @@ class RagPipeline:
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag")
 
     # ------------------------------------------------------------------ #
-    def ask(self, *, ctx: RequestContext, question: str, as_of: date | None = None) -> AskResponse:
+    def ask(
+        self,
+        *,
+        ctx: RequestContext,
+        question: str,
+        as_of: date | None = None,
+        _diag: bool = False,
+    ) -> AskResponse | tuple[AskResponse, dict]:
         trace = _Trace(request_id=f"req_{uuid.uuid4().hex[:12]}", ctx=ctx)
         t_start = time.perf_counter()
         today = self._today()
         masked = mask_pii(question)
 
         # Bước 2 & 3 chạy song song.
-        parse_f = self._pool.submit(self._parser.parse, masked, today)
+        parse_started = time.perf_counter()
+        parse_f = self._pool.submit(_timed_parse, self._parser, masked, today)
         scope_f = self._pool.submit(self._adapter.build_scope, ctx)
 
         t = time.perf_counter()
@@ -217,16 +240,15 @@ class RagPipeline:
         except Exception:  # noqa: BLE001 — fail closed
             logger.exception("authorization failed")
             trace.details["authz_error"] = True
-            return self._finish(trace, t_start, abstain(AbstainCode.AUTHZ_ERROR), None, None, today)
+            return self._finish(trace, t_start, abstain(AbstainCode.AUTHZ_ERROR), None, None, today, _diag=_diag, rr=None)
         trace.scope = scope
         trace.timings["authz_ms"] = _ms(t)
 
-        t = time.perf_counter()
         try:
-            sq = parse_f.result(timeout=self._cfg.parse_timeout_s)
+            sq, trace.timings["parse_ms"] = parse_f.result(timeout=self._cfg.parse_timeout_s)
         except Exception:  # noqa: BLE001
             sq = heuristic_query(masked)
-        trace.timings["parse_ms"] = _ms(t)
+            trace.timings["parse_ms"] = _ms(parse_started)
         trace.details["structured_query"] = sq.model_dump(mode="json")
 
         # Thời điểm T: tham số request > thời điểm trong câu hỏi > hôm nay.
@@ -242,14 +264,14 @@ class RagPipeline:
             )
         except RetrievalError:
             logger.exception("retrieval failed")
-            return self._finish(trace, t_start, abstain(AbstainCode.RETRIEVAL_ERROR), None, scope, t_asof)
+            return self._finish(trace, t_start, abstain(AbstainCode.RETRIEVAL_ERROR), None, scope, t_asof, _diag=_diag, rr=None)
         trace.timings["retrieval_ms"] = _ms(t)
         trace.details.update(
             keyword_hits=rr.keyword_hits, vector_hits=rr.vector_hits, expanded=rr.expanded,
             rejected_out_of_scope=rr.rejected_out_of_scope,
         )
         if not rr.candidates:
-            return self._finish(trace, t_start, abstain(AbstainCode.NO_EVIDENCE), None, scope, t_asof)
+            return self._finish(trace, t_start, abstain(AbstainCode.NO_EVIDENCE), None, scope, t_asof, _diag=_diag, rr=rr)
 
         # Bước 5
         t = time.perf_counter()
@@ -259,7 +281,7 @@ class RagPipeline:
             )
         except RetrievalError:
             logger.exception("successor check failed")
-            return self._finish(trace, t_start, abstain(AbstainCode.RETRIEVAL_ERROR), None, scope, t_asof)
+            return self._finish(trace, t_start, abstain(AbstainCode.RETRIEVAL_ERROR), None, scope, t_asof, _diag=_diag, rr=rr)
         resolution = resolve(
             rr.candidates, unit_chain=scope.unit_chain, as_of=t_asof,
             hidden_successor_ids=hidden, keep_overridden_context=self._cfg.keep_overridden_context,
@@ -271,7 +293,7 @@ class RagPipeline:
             owners = [scope.unit_labels.get(u, u) for u in resolution.conflict_unit_ids]
             gen = abstain(resolution.abstain_code or AbstainCode.NO_EVIDENCE, resolution.abstain_detail, owners)
             trace.details["abstain_code"] = gen.abstain_code.value if gen.abstain_code else None
-            return self._finish(trace, t_start, gen, resolution, scope, t_asof)
+            return self._finish(trace, t_start, gen, resolution, scope, t_asof, _diag=_diag, rr=rr)
 
         # Bước 6
         t = time.perf_counter()
@@ -281,10 +303,21 @@ class RagPipeline:
             authorized_chunk_ids={c.chunk_id for c in rr.candidates},
         )
         trace.timings["generation_ms"] = _ms(t)
-        return self._finish(trace, t_start, gen, resolution, scope, t_asof)
+        return self._finish(trace, t_start, gen, resolution, scope, t_asof, _diag=_diag, rr=rr)
 
     # ------------------------------------------------------------------ #
-    def _finish(self, trace: _Trace, t_start: float, gen: GenerationResult, resolution, scope, as_of) -> AskResponse:
+    def _finish(
+        self,
+        trace: _Trace,
+        t_start: float,
+        gen: GenerationResult,
+        resolution,
+        scope,
+        as_of,
+        *,
+        _diag: bool = False,
+        rr=None,
+    ) -> AskResponse | tuple[AskResponse, dict]:
         trace.timings["total_ms"] = _ms(t_start)
         if gen.abstain_code:
             trace.details["abstain_code"] = gen.abstain_code.value
@@ -301,23 +334,71 @@ class RagPipeline:
                         trace.source_hashes.append(ev.candidate.content_hash)
 
         applies_to = effective_at = None
-        if gen.status == "answered" and resolution is not None and scope is not None:
+        if gen.status in ("answered", "answer_with_escalation") and resolution is not None and scope is not None:
             applies_to = scope.unit_labels.get(resolution.controlling_unit_id or "", resolution.controlling_unit_id)
             effective_at = resolution.effective_at
 
+        audit_started = time.perf_counter()
         self._write_audit(trace, scope)
-        return AskResponse(
+        trace.timings["audit_ms"] = _ms(audit_started)
+        trace.timings["total_ms"] = _ms(t_start)
+        logger.info(
+            "rag_request_completed request_id=%s status=%s timings_ms=%s",
+            trace.request_id,
+            gen.status,
+            trace.timings,
+        )
+        resp = AskResponse(
             status=gen.status,  # type: ignore[arg-type]
             answer=gen.answer,
             applies_to=applies_to,
             context_label=scope.context_label if scope else None,
             effective_at=effective_at,
             as_of=as_of,
-            refused=gen.status != "answered",
+            refused=gen.status not in ("answered", "answer_with_escalation"),
             refusal_reason=public_refusal_reason(gen.abstain_code),
+            escalate_to=getattr(gen, "escalate_to", None),
             citations=[CitationOut(**{k: getattr(c, k) for k in CitationOut.model_fields}) for c in gen.citations],
             request_id=trace.request_id,
         )
+        if not _diag:
+            return resp
+
+        candidate_chunk_ids = [c.chunk_id for c in rr.candidates] if rr else []
+        candidate_document_ids = list(dict.fromkeys(c.document_id for c in rr.candidates)) if rr else []
+        diag_info = {
+            "candidate_chunk_ids": candidate_chunk_ids,
+            "candidate_document_ids": candidate_document_ids,
+            "resolution_trace": {
+                "ok": resolution.ok if resolution else False,
+                "dropped": [(d.document_id, d.reason) for d in resolution.dropped] if resolution else [],
+                "steps": [
+                    {"rule": s.rule, "document_id": s.document_id, "action": s.action, "detail": s.detail}
+                    for s in resolution.trace
+                ] if resolution else [],
+                "notes": resolution.notes if resolution else [],
+                "abstain_code": resolution.abstain_code.value if (resolution and resolution.abstain_code) else None,
+                "abstain_detail": resolution.abstain_detail if resolution else "",
+                "evidences": [
+                    {
+                        "chunk_id": ev.candidate.chunk_id,
+                        "document_id": ev.candidate.document_id,
+                        "role": ev.role,
+                        "group": ev.group,
+                    }
+                    for ev in resolution.evidences
+                ] if resolution else [],
+            },
+            "scope": {
+                "user_id": scope.user_id,
+                "context_id": scope.context_id,
+                "allowed_unit_ids": list(scope.allowed_unit_ids),
+                "max_classification": scope.max_classification,
+                "unit_chain": list(scope.unit_chain),
+            } if scope else None,
+            "timings": dict(trace.timings),
+        }
+        return resp, diag_info
 
     def _write_audit(self, trace: _Trace, scope: UserScope | None) -> None:
         if not self._audit:

@@ -12,6 +12,8 @@ effective_to: null
 status: active
 classification: internal
 mandatory: true
+policy_values:
+  annual_leave_days_min: 12
 supersedes: [grp-leave-2023]
 amends: []
 ---

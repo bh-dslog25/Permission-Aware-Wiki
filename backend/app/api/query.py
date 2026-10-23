@@ -1,6 +1,7 @@
 """Question-answering API for the permission-aware RAG MVP."""
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from typing import Any
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import (
     InvalidContext,
+    NeedsContextClarification,
     UnknownPersona,
     authenticate_user,
     context_unit,
@@ -17,7 +19,8 @@ from app.auth import (
     resolve_context,
     unit_name,
 )
-from app.rag.pipeline import RequestContext
+from app.conversations import append_exchange, get_conversation, list_conversations
+from app.rag.pipeline import AskResponse, ContextOption, RequestContext
 
 router = APIRouter(prefix="/api/v1", tags=["query"])
 
@@ -26,6 +29,7 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     context_id: str | None = None
     as_of: date | None = None
+    conversation_id: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -87,6 +91,26 @@ def login(payload: LoginRequest) -> dict[str, Any]:
     }
 
 
+@router.get("/conversations")
+def conversations(
+    x_persona_id: str | None = Header(default=None, alias="X-Persona-Id"),
+) -> list[dict[str, Any]]:
+    p = _persona(x_persona_id)
+    return list_conversations(p.user_id)
+
+
+@router.get("/conversations/{conversation_id}")
+def conversation(
+    conversation_id: str,
+    x_persona_id: str | None = Header(default=None, alias="X-Persona-Id"),
+) -> dict[str, Any]:
+    p = _persona(x_persona_id)
+    result = get_conversation(p.user_id, conversation_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cuộc trò chuyện")
+    return result
+
+
 @router.get("/me")
 def me(x_persona_id: str | None = Header(default=None, alias="X-Persona-Id")) -> dict[str, Any]:
     p = _persona(x_persona_id)
@@ -115,12 +139,36 @@ def ask(
     p = _persona(x_persona_id)
     try:
         context_id = resolve_context(p, payload.context_id)
+    except NeedsContextClarification as exc:
+        contexts = [
+            ContextOption(id=ctx, label=unit_name(context_unit(ctx)))
+            for ctx in exc.available_contexts
+        ]
+        return AskResponse(
+            status="needs_clarification",
+            answer="Bạn đang có nhiều ngữ cảnh. Vui lòng chọn ngữ cảnh trước khi hỏi.",
+            available_contexts=contexts,
+            request_id=f"req_{uuid.uuid4().hex[:12]}",
+        )
     except InvalidContext as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
+    conversation_id = payload.conversation_id or str(uuid.uuid4())
+    if payload.conversation_id and get_conversation(p.user_id, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cuộc trò chuyện")
+
     pipeline = _container(request).pipeline
-    return pipeline.ask(
+    response = pipeline.ask(
         ctx=RequestContext(user_id=p.user_id, context_id=context_id, clearance=p.clearance),
         question=payload.question,
         as_of=payload.as_of,
     )
+    response.conversation_id = conversation_id
+    append_exchange(
+        user_id=p.user_id,
+        conversation_id=conversation_id,
+        context_id=context_id,
+        question=payload.question,
+        answer=response.model_dump(mode="json"),
+    )
+    return response

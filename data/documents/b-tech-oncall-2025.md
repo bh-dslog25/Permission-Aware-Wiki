@@ -7,7 +7,7 @@ doc_type: process
 topic: on_call
 version: "2025"
 effective_from: "2025-01-01"
-effective_to: null
+effective_to: "2028-01-01"
 status: active
 classification: internal
 mandatory: false

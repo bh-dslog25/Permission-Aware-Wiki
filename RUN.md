@@ -67,6 +67,14 @@ pip install -e ".[ml]"
 
 Sau đó kiểm tra file `.env` hoặc file cấu hình backend để đảm bảo khớp với Docker DB.
 
+Khởi tạo/cập nhật schema (lệnh này idempotent, không xóa dữ liệu hiện có):
+
+```powershell
+python -m app.db init
+```
+
+Chạy lệnh này sau khi cập nhật backend để tạo bảng lịch sử hội thoại nếu database đã tồn tại.
+
 ## 4. Chạy backend
 
 ```bash
@@ -116,6 +124,12 @@ docker compose up -d
 docker compose up -d
 docker compose ps
 docker compose logs -f
+```
+
+```bash
+..\backend
+.\.venv\Scripts\python.exe -m pip install -e ".[ml]"
+.\.venv\Scripts\python.exe -m app.ingest.ingest run --force
 ```
 
 ```bash

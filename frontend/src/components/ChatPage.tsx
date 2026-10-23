@@ -1,10 +1,15 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   askQuestion,
+  fetchConversation,
+  fetchConversations,
   fetchPersonas,
+  submitFeedback,
   type ChatAnswer,
+  type ConversationSummary,
   type Persona,
   type User,
+  toConversationEntry,
 } from "../api";
 import ContextBadge from "./ContextBadge";
 import {
@@ -23,6 +28,7 @@ import SourceCard from "./SourceCard";
 type ChatPageProps = {
   user: User;
   onLogout: () => void;
+  onOpenOwnerPortal?: () => void;
 };
 
 type ConversationEntry = {
@@ -38,7 +44,7 @@ const suggestions = [
   "Chính sách thưởng Tết năm nay?",
 ];
 
-export default function ChatPage({ user, onLogout }: ChatPageProps) {
+export default function ChatPage({ user, onLogout, onOpenOwnerPortal }: ChatPageProps) {
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [activePersona, setActivePersona] = useState<Persona>({
     id: user.id,
@@ -55,7 +61,11 @@ export default function ChatPage({ user, onLogout }: ChatPageProps) {
   const [activeContextId, setActiveContextId] = useState<string>(user.defaultContextId);
   const [question, setQuestion] = useState("");
   const [conversation, setConversation] = useState<ConversationEntry[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [recentConversations, setRecentConversations] = useState<ConversationSummary[]>([]);
+  const [historyError, setHistoryError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -65,9 +75,33 @@ export default function ChatPage({ user, onLogout }: ChatPageProps) {
       if (matched) {
         setActivePersona(matched);
         setActiveContextId(matched.defaultContextId);
+        setConversation([]);
+        setConversationId(null);
       }
     });
   }, [user]);
+
+  useEffect(() => {
+    let isCurrent = true;
+    setIsLoadingHistory(true);
+    setRecentConversations([]);
+    setHistoryError("");
+    void fetchConversations(activePersona.id)
+      .then((items) => {
+        if (isCurrent) setRecentConversations(items);
+      })
+      .catch((error: unknown) => {
+        if (isCurrent) {
+          setHistoryError(error instanceof Error ? error.message : "Không tải được lịch sử.");
+        }
+      })
+      .finally(() => {
+        if (isCurrent) setIsLoadingHistory(false);
+      });
+    return () => {
+      isCurrent = false;
+    };
+  }, [activePersona.id]);
 
   async function submitQuestion(nextQuestion: string) {
     const cleanQuestion = nextQuestion.trim();
@@ -76,11 +110,27 @@ export default function ChatPage({ user, onLogout }: ChatPageProps) {
     setQuestion("");
     setIsLoading(true);
     try {
-      const answer = await askQuestion(cleanQuestion, activePersona.id, activeContextId);
+      const answer = await askQuestion(
+        cleanQuestion,
+        activePersona.id,
+        activeContextId,
+        conversationId ?? undefined,
+      );
+      if (answer.conversationId) setConversationId(answer.conversationId);
       setConversation((items) => [
         ...items,
         { id: answer.id, question: cleanQuestion, answer },
       ]);
+      try {
+        setRecentConversations(await fetchConversations(activePersona.id));
+        setHistoryError("");
+      } catch (historyLoadError) {
+        setHistoryError(
+          historyLoadError instanceof Error
+            ? historyLoadError.message
+            : "Không tải được lịch sử hội thoại.",
+        );
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Không thể gọi backend.";
       setConversation((items) => [
@@ -113,19 +163,34 @@ export default function ChatPage({ user, onLogout }: ChatPageProps) {
 
   function startNewConversation() {
     setConversation([]);
+    setConversationId(null);
     setQuestion("");
     inputRef.current?.focus();
+  }
+
+  async function openConversation(item: ConversationSummary) {
+    try {
+      const detail = await fetchConversation(activePersona.id, item.id);
+      setConversationId(detail.id);
+      setActiveContextId(detail.context_id);
+      setConversation(detail.messages.map(toConversationEntry));
+      setQuestion("");
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Không tải được cuộc trò chuyện.");
+    }
   }
 
   function handlePersonaChange(persona: Persona) {
     setActivePersona(persona);
     setActiveContextId(persona.defaultContextId);
     setConversation([]);
+    setConversationId(null);
   }
 
   function handleContextChange(contextId: string) {
     setActiveContextId(contextId);
     setConversation([]);
+    setConversationId(null);
   }
 
   return (
@@ -156,13 +221,34 @@ export default function ChatPage({ user, onLogout }: ChatPageProps) {
           <p className="px-2 text-[10px] font-bold uppercase tracking-[0.16em] text-[#8b928c]">
             Gần đây
           </p>
-          <button
-            className="mt-2 flex w-full items-center gap-2.5 rounded-xl bg-white/75 px-3 py-3 text-left text-xs font-semibold text-[#4e5851] shadow-sm"
-            type="button"
-          >
-            <MessageIcon className="h-4 w-4 shrink-0 text-[#4d745c]" />
-            <span className="truncate">Quy định nghỉ phép của tôi</span>
-          </button>
+          <div className="mt-2 max-h-[40vh] space-y-1 overflow-y-auto">
+            {isLoadingHistory && (
+              <p className="px-2 py-2 text-xs text-[#899089]">Đang tải lịch sử...</p>
+            )}
+            {historyError && (
+              <p className="px-2 py-2 text-xs text-[#a33c2f]">{historyError}</p>
+            )}
+            {!isLoadingHistory && !historyError && recentConversations.length === 0 && (
+              <p className="px-2 py-2 text-xs text-[#899089]">Chưa có cuộc trò chuyện nào.</p>
+            )}
+            {recentConversations.map((item) => (
+              <button
+                aria-current={conversationId === item.id ? "page" : undefined}
+                className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-3 text-left text-xs font-semibold transition ${
+                  conversationId === item.id
+                    ? "bg-white text-[#27593b] shadow-sm"
+                    : "text-[#4e5851] hover:bg-white/75"
+                }`}
+                key={item.id}
+                onClick={() => void openConversation(item)}
+                title={item.title}
+                type="button"
+              >
+                <MessageIcon className="h-4 w-4 shrink-0 text-[#4d745c]" />
+                <span className="truncate">{item.title}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="mt-auto">
@@ -202,6 +288,16 @@ export default function ChatPage({ user, onLogout }: ChatPageProps) {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
+            {onOpenOwnerPortal && (activePersona.role === "hr_owner" || activePersona.role === "security") && (
+              <button
+                onClick={onOpenOwnerPortal}
+                className="flex items-center gap-1.5 rounded-xl bg-[#e8f3ed] border border-[#cbe2d3] px-3 py-1.5 text-xs font-bold text-[#165c3a] transition hover:bg-[#d8ecdf]"
+                title="Vào trang phê duyệt dành cho Knowledge Owner"
+              >
+                <ShieldIcon className="h-3.5 w-3.5" />
+                Duyệt tài liệu (Owner)
+              </button>
+            )}
             <div className="hidden text-right sm:block">
               <p className="text-xs font-bold">{user.name}</p>
               <p className="mt-0.5 text-[10px] text-[#888f89]">{user.title}</p>
@@ -270,7 +366,15 @@ export default function ChatPage({ user, onLogout }: ChatPageProps) {
                         {entry.question}
                       </div>
                     </div>
-                    <AnswerBlock answer={entry.answer} />
+                    <AnswerBlock
+                      answer={entry.answer}
+                      activeContextId={activeContextId}
+                      personaId={activePersona.id}
+                      onSelectContext={(ctxId) => {
+                        handleContextChange(ctxId);
+                        void submitQuestion(entry.question);
+                      }}
+                    />
                   </div>
                 ))}
                 {isLoading && <LoadingAnswer />}
@@ -340,16 +444,85 @@ function LoadingAnswer() {
   );
 }
 
-function AnswerBlock({ answer }: { answer: ChatAnswer }) {
+function AnswerBlock({
+  answer,
+  activeContextId,
+  personaId,
+  onSelectContext,
+}: {
+  answer: ChatAnswer;
+  activeContextId: string;
+  personaId: string;
+  onSelectContext?: (contextId: string) => void;
+}) {
   const isDenied = answer.status === "denied";
   const isInsufficient = answer.status === "insufficient";
+  const isNeedsAttention = answer.status === "needs_attention";
+  const isClarification = answer.status === "needs_clarification";
+  const isEscalation = answer.status === "answer_with_escalation";
+  const [feedbackSent, setFeedbackSent] = useState(false);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
 
-  if (isDenied || isInsufficient) {
+  async function handleAskOwner() {
+    try {
+      setFeedbackLoading(true);
+      await submitFeedback(
+        answer.id,
+        activeContextId,
+        "Người dùng yêu cầu giải đáp từ người phụ trách cho câu trả lời này.",
+        answer.escalateTo || "Knowledge Owner",
+        personaId,
+      );
+      setFeedbackSent(true);
+    } catch (e) {
+      alert("Không gửi được phản hồi: " + (e as Error).message);
+    } finally {
+      setFeedbackLoading(false);
+    }
+  }
+
+  if (isClarification) {
+    return (
+      <div className="flex items-start gap-3">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[#eef3fe] text-[#2c5282]">
+          <AlertIcon className="h-4 w-4" />
+        </div>
+        <div className="max-w-2xl rounded-2xl border border-[#cfe2ff] bg-[#f8fbff] p-5">
+          <p className="text-[11px] font-bold uppercase tracking-[0.13em] text-[#2c5282]">
+            Cần xác định ngữ cảnh
+          </p>
+          <h2 className="mt-2 text-base font-semibold leading-7 tracking-[-0.02em] text-[#1a365d]">
+            {answer.content}
+          </h2>
+          {answer.availableContexts && answer.availableContexts.length > 0 && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              {answer.availableContexts.map((ctx) => (
+                <button
+                  key={ctx.id}
+                  type="button"
+                  onClick={() => onSelectContext?.(ctx.id)}
+                  className="rounded-xl border border-[#b6d4fe] bg-white px-3.5 py-2 text-xs font-semibold text-[#0d6efd] shadow-sm transition hover:bg-[#0d6efd] hover:text-white"
+                >
+                  Chọn: {ctx.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (isDenied || isInsufficient || isNeedsAttention) {
     return (
       <div className="flex items-start gap-3">
         <div
           className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
-            isDenied ? "bg-[#fff0ed] text-[#a84839]" : "bg-[#fff7e5] text-[#9a6a16]"
+            isDenied
+              ? "bg-[#fff0ed] text-[#a84839]"
+              : isInsufficient
+                ? "bg-[#fff7e5] text-[#9a6a16]"
+                : "bg-[#eef2f6] text-[#536579]"
           }`}
         >
           {isDenied ? <ShieldIcon className="h-4 w-4" /> : <AlertIcon className="h-4 w-4" />}
@@ -358,11 +531,17 @@ function AnswerBlock({ answer }: { answer: ChatAnswer }) {
           className={`max-w-2xl rounded-2xl border p-5 ${
             isDenied
               ? "border-[#f0d7d2] bg-[#fffaf9]"
-              : "border-[#eadfbd] bg-[#fffdf8]"
+              : isInsufficient
+                ? "border-[#eadfbd] bg-[#fffdf8]"
+                : "border-[#d8e0e9] bg-[#f9fbfd]"
           }`}
         >
           <p className="text-[11px] font-bold uppercase tracking-[0.13em] text-[#7f675f]">
-            {isDenied ? "Ngoài phạm vi truy cập" : "Chưa đủ bằng chứng"}
+            {isDenied
+              ? " · Không tìm thấy trong phạm vi của bạn"
+              : isInsufficient
+                ? " · Chưa đủ căn cứ chứng minh để trả lời"
+                : " · Dữ liệu hoặc hệ thống cần xử lý thêm"}
           </p>
           <h2 className="mt-2 text-lg font-semibold leading-7 tracking-[-0.02em]">
             {answer.content}
@@ -372,12 +551,20 @@ function AnswerBlock({ answer }: { answer: ChatAnswer }) {
               {detail}
             </p>
           ))}
-          <button
-            className="mt-5 rounded-xl border border-[#d6dcd7] bg-white px-4 py-2.5 text-xs font-bold text-[#3f4d43] transition hover:border-[#b9c5bb]"
-            type="button"
-          >
-            Hỏi người phụ trách
-          </button>
+          <div className="mt-5 flex items-center gap-3">
+            <button
+              className="rounded-xl border border-[#d6dcd7] bg-white px-4 py-2.5 text-xs font-bold text-[#3f4d43] transition hover:border-[#b9c5bb] disabled:opacity-50"
+              type="button"
+              disabled={feedbackLoading || feedbackSent}
+              onClick={() => void handleAskOwner()}
+            >
+              {feedbackSent
+                ? "✓ Đã gửi tới người phụ trách"
+                : feedbackLoading
+                  ? "Đang gửi..."
+                  : "Hỏi người phụ trách"}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -397,6 +584,14 @@ function AnswerBlock({ answer }: { answer: ChatAnswer }) {
           <span className="text-[10px] text-[#9ba19c]">{answer.answeredAt}</span>
         </div>
         <h2 className="text-xl font-semibold leading-7 tracking-[-0.025em]">{answer.title}</h2>
+        
+        {isEscalation && (
+          <div className="mt-3 flex items-center gap-2 rounded-xl border border-[#f3e3be] bg-[#fffcf2] px-3.5 py-2 text-xs font-medium text-[#8a5d14]">
+            <AlertIcon className="h-4 w-4 shrink-0" />
+            <span>Chủ đề cần xác nhận thêm với <b>{answer.escalateTo || "Knowledge Owner / Quản lý"}</b>.</span>
+          </div>
+        )}
+
         <p className="mt-3 text-sm leading-7 text-[#4f5952]">{answer.content}</p>
 
         {answer.details && (
@@ -410,20 +605,39 @@ function AnswerBlock({ answer }: { answer: ChatAnswer }) {
           </ul>
         )}
 
-        <div className="mt-6">
-          <div className="mb-3 flex items-center gap-2">
-            <BookIcon className="h-4 w-4 text-[#407254]" />
-            <p className="text-xs font-bold">
-              Nguồn trích dẫn
-              <span className="ml-1.5 font-medium text-[#8a918b]">({answer.sources.length})</span>
-            </p>
+        {isEscalation && (
+          <div className="mt-4">
+            <button
+              className="rounded-xl border border-[#d6dcd7] bg-white px-3.5 py-2 text-xs font-bold text-[#3f4d43] shadow-sm transition hover:border-[#b9c5bb] disabled:opacity-50"
+              type="button"
+              disabled={feedbackLoading || feedbackSent}
+              onClick={() => void handleAskOwner()}
+            >
+              {feedbackSent
+                ? "✓ Đã gửi yêu cầu xác nhận tới người phụ trách"
+                : feedbackLoading
+                  ? "Đang gửi..."
+                  : `Hỏi ${answer.escalateTo || "người phụ trách"}`}
+            </button>
           </div>
-          <div className="space-y-2">
-            {answer.sources.map((source, index) => (
-              <SourceCard index={index + 1} key={source.id} source={source} />
-            ))}
+        )}
+
+        {answer.sources && answer.sources.length > 0 && (
+          <div className="mt-6">
+            <div className="mb-3 flex items-center gap-2">
+              <BookIcon className="h-4 w-4 text-[#407254]" />
+              <p className="text-xs font-bold">
+                Nguồn trích dẫn
+                <span className="ml-1.5 font-medium text-[#8a918b]">({answer.sources.length})</span>
+              </p>
+            </div>
+            <div className="space-y-2">
+              {answer.sources.map((source, index) => (
+                <SourceCard index={index + 1} key={source.id} source={source} />
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </article>
     </div>
   );

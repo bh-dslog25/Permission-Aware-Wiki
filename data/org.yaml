@@ -116,7 +116,7 @@ users:
 
   - id: u_pham_lan
     name: "Phạm Lan"
-    persona: false
+    persona: true
     description: "Knowledge Owner / HR Công ty A (duyệt metadata, supersede)"
     join_date: "2019-09-02"
     memberships:

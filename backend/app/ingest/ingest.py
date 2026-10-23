@@ -47,7 +47,7 @@ REQUIRED_FIELDS = (
     "document_id", "title", "owner_unit", "scope", "doc_type", "version",
     "effective_from", "status", "classification", "mandatory",
 )
-OPTIONAL_FIELDS = ("logical_document_id", "effective_to", "topic", "parent_conformance", "supersedes", "amends")
+OPTIONAL_FIELDS = ("logical_document_id", "effective_to", "topic", "parent_conformance", "policy_values", "supersedes", "amends")
 
 ALLOWED_STATUS = frozenset(DOC_STATUSES)
 ALLOWED_DOC_TYPES_SET = frozenset(ALLOWED_DOC_TYPES)

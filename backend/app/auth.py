@@ -60,6 +60,7 @@ PERSONA_ALIASES = {
     "an": "u_minh_anh",
     "binh": "u_quoc_bao",
     "chi": "u_thu_ha",
+    "lan": "u_pham_lan",
 }
 
 CONTEXT_ALIASES = {
@@ -139,13 +140,13 @@ def authenticate_user(identifier: str, password: str) -> Persona | None:
     Mật khẩu mặc định trong demo là 'demo123' hoặc bất kỳ mật khẩu nào được gán trong org.yaml.
     """
     clean_id = identifier.strip().lower()
+    aliased_id = PERSONA_ALIASES.get(clean_id, clean_id).lower()
     for p in list_personas():
         expected_email = p.email.lower()
         raw_id = p.user_id.lower()
         simple_id = p.user_id.removeprefix("u_").lower()
 
-        if clean_id in (expected_email, raw_id, simple_id):
-            # Trong org.yaml nếu có trường password thì kiểm tra, nếu không mặc định nhận demo123 (hoặc không rỗng)
+        if clean_id in (expected_email, raw_id, simple_id) or aliased_id in (raw_id, simple_id):
             return p
     return None
 
@@ -158,12 +159,20 @@ def get_persona(persona_id: str) -> Persona:
     raise UnknownPersona(persona_id)
 
 
+class NeedsContextClarification(Exception):
+    def __init__(self, available_contexts: tuple[str, ...]):
+        super().__init__(f"User has multiple contexts: {available_contexts}")
+        self.available_contexts = available_contexts
+
+
 def resolve_context(persona: Persona, requested: str | None = None) -> str:
-    """Trả về đúng MỘT ngữ cảnh. Không chọn thì dùng ngữ cảnh đầu tiên.
+    """Trả về đúng MỘT ngữ cảnh. Nếu người dùng kiêm nhiệm nhiều ngữ cảnh mà không chỉ định thì yêu cầu làm rõ.
 
     Quyền chọn ngữ cảnh được OpenFGA kiểm tra lại (quan hệ assigned) trong policy_adapter.
     """
     if requested is None:
+        if len(persona.allowed_contexts) > 1:
+            raise NeedsContextClarification(persona.allowed_contexts)
         if not persona.allowed_contexts:
             raise InvalidContext(f"{persona.user_id} không có ngữ cảnh hợp lệ")
         return persona.allowed_contexts[0]
